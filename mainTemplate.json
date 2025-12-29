@@ -90,6 +90,13 @@
         "description": "Name of the Check Point Security Gateway"
       }
     },
+    "appendDeploymentSuffix": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "If true, append a deployment-unique suffix to VM-related resource names to avoid updating immutable properties like osProfile.customData on an existing VM."
+      }
+    },
     "vmSize": {
       "type": "string",
       "defaultValue": "Standard_D4ds_v5",
@@ -187,6 +194,13 @@
         "description": "Bootstrap script"
       },
       "defaultValue": ""
+    },
+    "bootstrapScriptUrl": {
+      "type": "string",
+      "defaultValue": "https://raw.githubusercontent.com/roie9876/checkpoint-mgmt/main/cp-bootstrap-varlog-premiumv2.sh",
+      "metadata": {
+        "description": "URL of a bootstrap script to download and execute on first boot (used when bootstrapScript is empty)."
+      }
     },
     "enableApi": {
       "type": "string",
@@ -360,6 +374,9 @@
   "variables": {
     "templateName": "management",
     "templateVersion": "20240904",
+    "nameSuffix": "[if(parameters('appendDeploymentSuffix'), concat('-', uniqueString(resourceGroup().id, deployment().name)), '')]",
+    "vmNameEffective": "[concat(parameters('vmName'), variables('nameSuffix'))]",
+    "nsgNameEffective": "[concat(variables('vmNameEffective'),'-nsg')]",
     "location": "[parameters('location')]",
     "offers": {
       "R81.10 - Bring Your Own License": "BYOL",
@@ -1157,7 +1174,7 @@
     "storageAccountType": "Standard_LRS",
     "diskSize100GB": 100,
     "diskSizeGB": "[add(parameters('additionalDiskSizeGB'), variables('diskSize100GB'))]",
-    "dataDiskName": "[concat(parameters('vmName'), '-datadisk-v2')]",
+    "dataDiskName": "[concat(variables('vmNameEffective'), '-datadisk-v2')]",
     "deployDataDisk": "[and(parameters('deployPremiumV2DataDisk'), greater(parameters('dataDiskV2SizeGB'), 0))]",
     "customData": "[concat('#!/usr/bin/python3 /etc/cloud_config.py\n', '\n', 'installationType=\"', parameters('installationType'), '\"', '\n', 'allowUploadDownload=\"', variables('allowUploadDownload'), '\"', '\n', 'osVersion=\"', variables('osVersion'), '\"', '\n', 'templateName=\"', variables('templateName'), '\"', '\n', 'isBlink=\"', variables('isBlink'), '\"', '\n', 'templateVersion=\"', variables('templateVersion'), '\"', '\n', 'bootstrapScript64=\"', variables('bootstrapScript64'), '\"', '\n', 'location=\"', variables('location'), '\"', '\n', 'managementGUIClientNetwork=\"', variables('managementGUIClientNetwork'), '\"', '\n', 'enableApi=\"', parameters('enableApi'), '\"', '\n', 'adminShell=\"', parameters('adminShell'), '\"', '\n', 'MaintenanceModePassword=\"', parameters('MaintenanceModePasswordHash'), '\"', '\n', 'passwordHash=\"', parameters('SerialConsolePasswordHash'), '\"', '\n')]",
     "customData64": "[base64(variables('customData'))]",
@@ -1181,7 +1198,7 @@
       "id": "[resourceId('Microsoft.Compute/images/', variables('customImage'))]"
     },
     "imageReference": "[if(equals(parameters('sourceImageVhdUri'),'noCustomUri'), variables('imageReferenceMarketplace'), variables('imageReferenceCustomUri'))]",
-    "nic1Name": "[concat(parameters('vmName'), '-eth0')]",
+    "nic1Name": "[concat(variables('vmNameEffective'), '-eth0')]",
     "linuxConfigurationpassword": {
       "disablePasswordAuthentication": "false"
     },
@@ -1209,9 +1226,13 @@
     },
     "plan": "[if(equals(variables('offer'), 'BYOL'), variables('planBYOL'), variables('planMGMT25'))]",
     "identity": "[if(parameters('msi'), json('{\"type\": \"SystemAssigned\"}'), json('null'))]",
-    "publicIPAddressName": "[parameters('vmName')]",
+    "publicIPAddressName": "[variables('vmNameEffective')]",
     "publicIPAddressId": "[resourceId('Microsoft.Network/publicIPAddresses', variables('publicIPAddressName'))]",
-    "bootstrapScript64": "[base64(parameters('bootstrapScript'))]",
+    "bootstrapLogPath": "/var/log/cp-bootstrap-varlog.log",
+    "bootstrapSuccessPath": "/var/log/cp-bootstrap-varlog.SUCCESS",
+    "deployBootstrapExtension": "[not(equals(parameters('bootstrapScriptUrl'), ''))]",
+    "bootstrapScriptEffective": "[if(equals(parameters('bootstrapScript'), ''), concat(\n    '#!/bin/bash\n',\n    'set -euo pipefail\n',\n    'LOG=/var/log/cp-bootstrap-varlog.log\n',\n    'mkdir -p /var/log\n',\n    'exec > >(tee -a \"$LOG\") 2>&1\n',\n    'echo \"[cp-bootstrap] start $(date -Is)\"\n',\n    'URL=\"', parameters('bootstrapScriptUrl'), '\"\n',\n    'OUT=/var/tmp/cp-bootstrap.sh\n',\n    'echo \"[cp-bootstrap] downloading $URL\"\n',\n    'ok=0\n',\n    'for i in $(seq 1 60); do\n',\n    '  if curl -fsSL --connect-timeout 5 --max-time 30 \"$URL\" -o \"$OUT\"; then\n',\n    '    if [ -s \"$OUT\" ]; then ok=1; break; fi\n',\n    '  fi\n',\n    '  echo \"[cp-bootstrap] download attempt $i failed, retrying in 10s\"\n',\n    '  sleep 10\n',\n    'done\n',\n    'if [ \"$ok\" -ne 1 ]; then\n',\n    '  echo \"[cp-bootstrap] ERROR: failed to download bootstrap script after retries\"\n',\n    '  exit 11\n',\n    'fi\n',\n    'chmod +x \"$OUT\"\n',\n    'echo \"[cp-bootstrap] executing $OUT\"\n',\n    '/bin/bash -x \"$OUT\"\n',\n    'echo \"[cp-bootstrap] finished $(date -Is)\"\n',\n    'touch /var/log/cp-bootstrap-varlog.SUCCESS\n'\n  ), parameters('bootstrapScript'))]",
+    "bootstrapScript64": "[base64(variables('bootstrapScriptEffective'))]",
     "allowUploadDownload": "[parameters('allowDownloadFromUploadToCheckPoint')]",
     "_artifactsLocation": "[if(contains(parameters('_artifactsLocation'),'raw.githubusercontent.com/CheckPointSW/CloudGuardIaaS/master/azure/templates/marketplace'),'https://raw.githubusercontent.com/CheckPointSW/CloudGuardIaaS/master/azure/templates/',parameters('_artifactsLocation'))]",
     "networkSetupURL": "[uri(variables('_artifactsLocation'), concat('nestedtemplates/vnet-1-subnet-', parameters('vnetNewOrExisting'), '.json', parameters('_artifactsLocationSasToken')))]",
@@ -1219,7 +1240,7 @@
     "deployNewVnet": "[equals(parameters('vnetNewOrExisting'), 'new')]",
     "vnetRGName": "[if(variables('deployNewVnet'), resourceGroup().name, parameters('virtualNetworkExistingRGName'))]",
     "NewNsgReference": {
-      "id": "[resourceId('Microsoft.Network/networkSecurityGroups', parameters('NewNsgName'))]"
+      "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgNameEffective'))]"
     }
   },
   "resources": [
@@ -1309,7 +1330,7 @@
             "value": false
           },
           "NewNsgName": {
-            "value": "[parameters('NewNsgName')]"
+            "value": "[variables('nsgNameEffective')]"
           },
           "tagsByResource": {
             "value": "[parameters('tagsByResource')]"
@@ -1345,7 +1366,7 @@
             "value": false
           },
           "NewNsgName": {
-            "value": "[parameters('NewNsgName')]"
+            "value": "[variables('nsgNameEffective')]"
           },
           "tagsByResource": {
             "value": "[parameters('tagsByResource')]"
@@ -1379,7 +1400,7 @@
       "type": "Microsoft.Network/networkSecurityGroups",
       "apiVersion": "2021-08-01",
       "location": "[variables('location')]",
-      "name": "[parameters('NewNsgName')]",
+      "name": "[variables('nsgNameEffective')]",
       "properties": {
         "securityRules": [
           {
@@ -1516,30 +1537,16 @@
       "type": "Microsoft.Network/networkInterfaces",
       "apiVersion": "2021-08-01",
       "dependsOn": [
-        "[coalesce(resourceId('Microsoft.Resources/deployments', 'networkNewSetup'), resourceId('Microsoft.Resources/deployments', 'networkExistingSetup'))]",
+        "[if(equals(parameters('vnetNewOrExisting'), 'new'), resourceId('Microsoft.Resources/deployments', 'networkNewSetup'), resourceId('Microsoft.Resources/deployments', 'networkExistingSetup'))]",
         "[variables('publicIPAddressId')]",
-        "[coalesce(resourceId('Microsoft.Network/networkSecurityGroups', parameters('NewNsgName')), variables('publicIPAddressId'))]"
+        "[if(parameters('deployNewNSG'), resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgNameEffective')), variables('publicIPAddressId'))]"
       ],
       "location": "[variables('location')]",
       "name": "[variables('nic1Name')]",
       "properties": {
         "enableIPForwarding": false,
         "networkSecurityGroup": "[if(parameters('deployNewNSG') , variables('NewNsgReference') , parameters('ExistingNSG'))]",
-        "ipConfigurations": [
-          {
-            "name": "ipconfig1",
-            "properties": {
-              "privateIPAddress": "[parameters('Subnet1StartAddress')]",
-              "privateIPAllocationMethod": "Static",
-              "PublicIpAddress": {
-                "Id": "[variables('publicIPAddressId')]"
-              },
-              "subnet": {
-                "id": "[resourceId(variables('vnetRGName') ,'Microsoft.Network/virtualNetworks/subnets', parameters('virtualNetworkName'), parameters('Subnet1Name'))]"
-              }
-            }
-          }
-        ]
+        "ipConfigurations": "[if(parameters('appendDeploymentSuffix'), createArray(createObject('name','ipconfig1','properties',createObject('privateIPAllocationMethod','Dynamic','publicIPAddress',createObject('id',variables('publicIPAddressId')),'subnet',createObject('id',resourceId(variables('vnetRGName'),'Microsoft.Network/virtualNetworks/subnets',parameters('virtualNetworkName'),parameters('Subnet1Name')))))), createArray(createObject('name','ipconfig1','properties',createObject('privateIPAddress',parameters('Subnet1StartAddress'),'privateIPAllocationMethod','Static','publicIPAddress',createObject('id',variables('publicIPAddressId')),'subnet',createObject('id',resourceId(variables('vnetRGName'),'Microsoft.Network/virtualNetworks/subnets',parameters('virtualNetworkName'),parameters('Subnet1Name')))))))]"
       },
       "tags": "[ if(contains(parameters('tagsByResource'), 'Microsoft.Network/networkInterfaces'), parameters('tagsByResource')['Microsoft.Network/networkInterfaces'], json('{}')) ]"
     },
@@ -1575,7 +1582,7 @@
       "zones": [
         "[parameters('availabilityZone')]"
       ],
-      "name": "[parameters('vmName')]",
+      "name": "[variables('vmNameEffective')]",
       "plan": "[if(equals(parameters('sourceImageVhdUri'),'noCustomUri'), variables('plan'), json('null'))]",
       "identity": "[variables('identity')]",
       "properties": {
@@ -1599,7 +1606,7 @@
         "osProfile": {
           "adminPassword": "[parameters('adminPassword')]",
           "adminUsername": "[concat('not','used')]",
-          "computerName": "[toLower(parameters('vmName'))]",
+          "computerName": "[toLower(variables('vmNameEffective'))]",
           "customData": "[variables('customData64')]",
           "linuxConfiguration": "[variables('linuxConfiguration')]"
         },
@@ -1609,7 +1616,7 @@
             "caching": "ReadWrite",
             "createOption": "FromImage",
             "diskSizeGB": "[variables('diskSizeGB')]",
-            "name": "[parameters('vmName')]",
+            "name": "[variables('vmNameEffective')]",
             "managedDisk": {
               "storageAccountType": "[parameters('diskType')]"
             }
@@ -1618,6 +1625,31 @@
         }
       },
       "tags": "[ if(contains(parameters('tagsByResource'), 'Microsoft.Compute/virtualMachines'), parameters('tagsByResource')['Microsoft.Compute/virtualMachines'], json('{}')) ]"
+    },
+    {
+      "condition": "[variables('deployBootstrapExtension')]",
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(variables('vmNameEffective'), '/cpBootstrap')]",
+      "location": "[variables('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', variables('vmNameEffective'))]"
+      ],
+      "properties": {
+        "publisher": "Microsoft.Azure.Extensions",
+        "type": "CustomScript",
+        "typeHandlerVersion": "2.1",
+        "autoUpgradeMinorVersion": true,
+        "settings": {
+          "fileUris": [
+            "[parameters('bootstrapScriptUrl')]"
+          ]
+        },
+        "protectedSettings": {
+          "commandToExecute": "[concat('/bin/bash -c \"set -euo pipefail; LOG=', variables('bootstrapLogPath'), '; OK=', variables('bootstrapSuccessPath'), '; mkdir -p /var/log; exec > >(tee -a $LOG) 2>&1; echo [cp-bootstrap-ext] start $(date -Is); SRC=/var/lib/waagent/custom-script/download/0/$(basename ', parameters('bootstrapScriptUrl'), '); echo [cp-bootstrap-ext] using $SRC; chmod +x $SRC; /bin/bash -x $SRC; echo [cp-bootstrap-ext] finished $(date -Is); touch $OK\"')]"
+        }
+      },
+      "tags": "[ if(contains(parameters('tagsByResource'), 'Microsoft.Compute/virtualMachines/extensions'), parameters('tagsByResource')['Microsoft.Compute/virtualMachines/extensions'], json('{}')) ]"
     }
   ],
   "outputs": {
@@ -1628,6 +1660,10 @@
     "FQDN": {
       "type": "string",
       "value": "[reference(variables('publicIPAddressId')).dnsSettings.fqdn]"
+    },
+    "BootstrapLogHint": {
+      "type": "string",
+      "value": "After first boot, check /var/log/cp-bootstrap-varlog.log and /var/log/cp-bootstrap-varlog.SUCCESS on the VM. These are written by the VM CustomScript extension cpBootstrap."
     }
   }
 }
