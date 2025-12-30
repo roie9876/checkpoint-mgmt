@@ -64,6 +64,32 @@ wait_for_blockdev() {
   return 1
 }
 
+resolve_symlink() {
+  local path="$1"
+  if command -v readlink >/dev/null 2>&1; then
+    readlink -f "$path"
+  else
+    echo "$path"
+  fi
+}
+
+swapoff_if_active() {
+  local dev="$1"
+  if [ -z "$dev" ]; then
+    return 0
+  fi
+  if grep -q "^$dev[[:space:]]" /proc/swaps 2>/dev/null; then
+    if command -v swapoff >/dev/null 2>&1; then
+      log "Swap is active on $dev; disabling it."
+      swapoff "$dev" || return 1
+    else
+      log "Swap is active on $dev but swapoff is not available."
+      return 1
+    fi
+  fi
+  return 0
+}
+
 extend_var_log_lvm() {
   local data_disk="$1"
   local log_src vg_name lv_name lv_path part
@@ -90,6 +116,8 @@ extend_var_log_lvm() {
 
   part="${data_disk}1"
   wait_for_blockdev "$part" 20 1 || return 1
+
+  swapoff_if_active "$part" || return 1
 
   if ! pvs --noheadings -o pv_name 2>/dev/null | awk '{print $1}' | grep -qx "$part"; then
     if blkid "$part" >/dev/null 2>&1; then
@@ -145,9 +173,29 @@ extend_var_log_lvm() {
   return 0
 }
 
-# Pick the first non-OS disk. We avoid /dev/sda intentionally.
-# We also avoid any disk that already backs / or /var/log.
+# Pick the Azure data disk via LUN when possible (stable), then fallback.
+# You can override by exporting DATA_DISK_LUN (e.g., 0,1,2).
 pick_data_disk() {
+  local lun_dir="/dev/disk/azure/scsi1"
+  local lun_path=""
+  local lun="${DATA_DISK_LUN:-}"
+
+  if [ -d "$lun_dir" ]; then
+    if [ -n "$lun" ] && [ -e "$lun_dir/lun$lun" ]; then
+      lun_path="$lun_dir/lun$lun"
+    else
+      lun_path="$(ls "$lun_dir"/lun* 2>/dev/null | sort -V | head -n1 || true)"
+    fi
+
+    if [ -n "$lun_path" ] && [ -e "$lun_path" ]; then
+      local dev
+      dev="$(resolve_symlink "$lun_path")"
+      log "Using Azure data disk: $lun_path -> $dev"
+      echo "$dev"
+      return 0
+    fi
+  fi
+
   log "Detecting OS disk(s) from mounts..."
   local os_src log_src
   os_src="$(get_mount_source /)"
@@ -173,6 +221,12 @@ pick_data_disk() {
     # (covers cases where SOURCE is /dev/mapper/...; we do a best-effort check)
     if echo "$os_src $log_src" | grep -q "$(basename "$d")"; then
       log "Skipping in-use disk: $d"
+      continue
+    fi
+
+    # Skip disks that are actively used as swap
+    if grep -q "^$d[[:space:]]" /proc/swaps 2>/dev/null; then
+      log "Skipping swap disk: $d"
       continue
     fi
 
@@ -207,6 +261,9 @@ echo "Selected data disk: $DATA_DISK"
 # Wait for disk to be present
 wait_for_blockdev "$DATA_DISK" 60 2 || fail "Disk $DATA_DISK did not appear."
 
+# If the disk is used as swap, disable it before we modify partitioning.
+swapoff_if_active "$DATA_DISK" || fail "Failed to disable swap on $DATA_DISK"
+
 # If /var/log is an LVM LV, extend it with the new disk and exit.
 if extend_var_log_lvm "$DATA_DISK"; then
   touch /var/log/cp-bootstrap-varlog.SUCCESS
@@ -229,12 +286,15 @@ if [ ! -b "$PART" ]; then
   command -v parted >/dev/null 2>&1 || fail "parted not found. Cannot partition disk."
   parted -s "$DATA_DISK" mklabel gpt
   parted -s "$DATA_DISK" mkpart primary 1MiB 100%
+  parted -s "$DATA_DISK" set 1 lvm on || true
 fi
 
 # Wait for partition node
 wait_for_blockdev "$PART" 20 1 || fail "Partition $PART did not appear."
 
 echo "Partition ready: $PART"
+
+swapoff_if_active "$PART" || fail "Failed to disable swap on $PART"
 
 # If already has filesystem and is mounted on /var/log, finish.
 if is_mounted /var/log; then
