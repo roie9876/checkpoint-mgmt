@@ -96,7 +96,9 @@ Every 5.0s: du -sh /var/log/opt/CPrt-R82/log_indexes/* | sort -h     Tue Dec 30 
 952K    /var/log/opt/CPrt-R82/log_indexes/audit_2025-12-30T00-00-00
 ```
 
-Screenshot: `log.jpeg`
+Screenshot:
+
+![Live log proof](log.jpeg)
 
 ## Summary (for non-technical readers)
 - We added a second disk and attached it to the existing LVM storage pool.
