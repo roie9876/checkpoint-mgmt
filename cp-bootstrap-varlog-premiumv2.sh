@@ -51,6 +51,26 @@ get_xfs_sectsz() {
   xfs_info /var/log 2>/dev/null | tr ' ' '\n' | awk -F= '$1=="sectsz"{print $2; exit}'
 }
 
+get_logical_sector_size() {
+  blockdev --getss "$1" 2>/dev/null || echo ""
+}
+
+is_aligned_4k() {
+  local bytes="$1"
+  [ -n "$bytes" ] || return 1
+  awk -v b="$bytes" 'BEGIN { exit (b % 4096 == 0) ? 0 : 1 }'
+}
+
+wait_for_partitions() {
+  local dev="$1"
+  if command -v partprobe >/dev/null 2>&1; then
+    partprobe "$dev" || true
+  fi
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm settle || true
+  fi
+}
+
 wait_for_blockdev() {
   local dev="$1"
   local tries="${2:-60}"
@@ -118,6 +138,8 @@ extend_var_log_lvm() {
   wait_for_blockdev "$part" 20 1 || return 1
 
   swapoff_if_active "$part" || return 1
+  local data_ss pe_start_bytes
+  data_ss="$(get_logical_sector_size "$data_disk")"
 
   if ! pvs --noheadings -o pv_name 2>/dev/null | awk '{print $1}' | grep -qx "$part"; then
     if blkid "$part" >/dev/null 2>&1; then
@@ -129,7 +151,18 @@ extend_var_log_lvm() {
       fi
     fi
     log "Creating LVM PV on $part"
-    pvcreate -ff -y "$part"
+    if [ -n "$data_ss" ] && [ "$data_ss" -ge 4096 ]; then
+      pvcreate --dataalignment 4K -ff -y "$part"
+    else
+      pvcreate -ff -y "$part"
+    fi
+  fi
+
+  if [ -n "$data_ss" ] && [ "$data_ss" -ge 4096 ]; then
+    pe_start_bytes="$(pvs --noheadings --units b -o pe_start "$part" 2>/dev/null | tr -d ' B')"
+    if ! is_aligned_4k "$pe_start_bytes"; then
+      fail "PV on $part is not 4K aligned (pe_start=${pe_start_bytes}B). Recreate PV with --dataalignment 4K."
+    fi
   fi
 
   if ! pvs --noheadings -o pv_name,vg_name 2>/dev/null | awk '{print $1":"$2}' | grep -qx "$part:$vg_name"; then
@@ -287,6 +320,7 @@ if [ ! -b "$PART" ]; then
   parted -s "$DATA_DISK" mklabel gpt
   parted -s "$DATA_DISK" mkpart primary 1MiB 100%
   parted -s "$DATA_DISK" set 1 lvm on || true
+  wait_for_partitions "$DATA_DISK"
 fi
 
 # Wait for partition node

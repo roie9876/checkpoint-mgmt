@@ -18,3 +18,7 @@ df -h /var/log
 [Expert@cp-mgmt-gnnm3k2ly234e:0]# blockdev --getss /dev/sdc
 4096
 [Expert@cp-mgmt-gnnm3k2ly234e:0]# 
+
+
+watch -n 5 'lvs -a -o+devices'
+watch -n 5 'pvs -o+pv_used,vg_name'
