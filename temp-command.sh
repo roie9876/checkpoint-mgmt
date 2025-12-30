@@ -22,3 +22,5 @@ df -h /var/log
 
 watch -n 5 'lvs -a -o+devices'
 watch -n 5 'pvs -o+pv_used,vg_name'
+
+lvs -o lv_name,devices

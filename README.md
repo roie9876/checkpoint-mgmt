@@ -37,6 +37,7 @@ When a second disk is attached (for example `/dev/sdb`):
 2) Add the new PV to the existing VG (`vg_splat`).
 3) Extend `lv_log` to use the free space.
 4) Grow the XFS filesystem on `/var/log` (no unmount needed).
+5) If the data disk is 4K logical sectors, the script enforces 4K PV alignment.
 
 This gives `/var/log` more space immediately and keeps the system online.
 
@@ -75,9 +76,14 @@ To verify where the extents live:
 - **Only /var/log** benefits, because only `lv_log` was extended.
 - **Management DB / policy DB** are on other locations and do not move automatically.
 
+## 4K sector alignment (Premium SSD v2)
+Premium SSD v2 uses 4K logical sectors. If LVM writes are not 4K-aligned, `pvmove`
+can stall and the kernel logs I/O errors. The bootstrap script now:
+- Creates the PV with `pvcreate --dataalignment 4K` when it detects a 4K disk.
+- Fails fast if the PV alignment is not 4K-safe.
+
 ## Summary (for non-technical readers)
 - We added a second disk and attached it to the existing LVM storage pool.
 - We made the log volume bigger and kept the system running.
 - If we fully move the log volume to the new disk, all log I/O uses that disk.
 - Other system data is not moved unless we explicitly do it.
-

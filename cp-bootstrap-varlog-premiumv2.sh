@@ -71,6 +71,16 @@ wait_for_partitions() {
   fi
 }
 
+report_final_layout() {
+  log "Final layout summary:"
+  if command -v lvs >/dev/null 2>&1; then
+    lvs -o lv_name,devices || true
+  fi
+  if command -v df >/dev/null 2>&1; then
+    df -h /var/log || true
+  fi
+}
+
 wait_for_blockdev() {
   local dev="$1"
   local tries="${2:-60}"
@@ -299,6 +309,7 @@ swapoff_if_active "$DATA_DISK" || fail "Failed to disable swap on $DATA_DISK"
 
 # If /var/log is an LVM LV, extend it with the new disk and exit.
 if extend_var_log_lvm "$DATA_DISK"; then
+  report_final_layout
   touch /var/log/cp-bootstrap-varlog.SUCCESS
   echo "BOOTSTRAP SUCCESS: $(date -Is)"
   exit 0
