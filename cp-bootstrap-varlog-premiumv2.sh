@@ -25,6 +25,10 @@ echo "PATH: $PATH"
 # ----------------------------
 # Helpers
 # ----------------------------
+log() {
+  echo "$*" >&2
+}
+
 fail() {
   echo "BOOTSTRAP FAIL: $(date -Is) :: $*"
   exit 1
@@ -32,6 +36,15 @@ fail() {
 
 is_mounted() {
   mountpoint -q "$1"
+}
+
+get_mount_source() {
+  local mnt="$1"
+  if command -v findmnt >/dev/null 2>&1; then
+    findmnt -n -o SOURCE "$mnt" 2>/dev/null || true
+  else
+    mount | awk -v m="$mnt" '$3==m {print $1; exit}'
+  fi
 }
 
 wait_for_blockdev() {
@@ -50,14 +63,14 @@ wait_for_blockdev() {
 # Pick the first non-OS disk. We avoid /dev/sda intentionally.
 # We also avoid any disk that already backs / or /var/log.
 pick_data_disk() {
-  echo "Detecting OS disk(s) from mounts..."
+  log "Detecting OS disk(s) from mounts..."
   local os_src log_src
-  os_src="$(findmnt -n -o SOURCE / || true)"
-  log_src="$(findmnt -n -o SOURCE /var/log || true)"
-  echo "Root mounted from: ${os_src:-<unknown>}"
-  echo "/var/log mounted from: ${log_src:-<unknown>}"
+  os_src="$(get_mount_source /)"
+  log_src="$(get_mount_source /var/log)"
+  log "Root mounted from: ${os_src:-<unknown>}"
+  log "/var/log mounted from: ${log_src:-<unknown>}"
 
-  echo "Enumerating candidate disks..."
+  log "Enumerating candidate disks..."
   # Use /sys/block to avoid needing lsblk (not always present)
   for b in /sys/block/sd*; do
     local d="/dev/$(basename "$b")"
@@ -67,21 +80,21 @@ pick_data_disk() {
 
     # Skip OS disk by name
     if [[ "$d" == "/dev/sda" ]]; then
-      echo "Skipping OS disk: $d"
+      log "Skipping OS disk: $d"
       continue
     fi
 
     # Skip if this disk is already used by root or /var/log source
     # (covers cases where SOURCE is /dev/mapper/...; we do a best-effort check)
     if echo "$os_src $log_src" | grep -q "$(basename "$d")"; then
-      echo "Skipping in-use disk: $d"
+      log "Skipping in-use disk: $d"
       continue
     fi
 
     # If it already has partitions/filesystems, we still can use it,
     # but for safety we prefer disks with no partitions.
     # We'll print what we see and let the script proceed (fresh env expected).
-    echo "Candidate disk found: $d"
+    log "Candidate disk found: $d"
     echo "$d"
     return 0
   done
@@ -95,7 +108,7 @@ pick_data_disk() {
 
 # If /var/log is already mounted on a non-root disk and has 4K sectsz, we can treat it as done.
 if is_mounted /var/log; then
-  cur_src="$(findmnt -n -o SOURCE /var/log || true)"
+  cur_src="$(get_mount_source /var/log)"
   echo "/var/log already mounted from: ${cur_src:-<unknown>}"
 fi
 
