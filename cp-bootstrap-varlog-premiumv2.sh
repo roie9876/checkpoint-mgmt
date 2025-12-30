@@ -47,6 +47,10 @@ get_mount_source() {
   fi
 }
 
+get_xfs_sectsz() {
+  xfs_info /var/log 2>/dev/null | tr ' ' '\n' | awk -F= '$1=="sectsz"{print $2; exit}'
+}
+
 wait_for_blockdev() {
   local dev="$1"
   local tries="${2:-60}"
@@ -58,6 +62,87 @@ wait_for_blockdev() {
     sleep "$sleep_s"
   done
   return 1
+}
+
+extend_var_log_lvm() {
+  local data_disk="$1"
+  local log_src vg_name lv_name lv_path part
+  local lv_size_mb pv_free_mb cur_pvs moved_ok
+
+  log_src="$(get_mount_source /var/log)"
+  case "$log_src" in
+    /dev/mapper/*) ;;
+    *) return 1 ;;
+  esac
+
+  command -v lvs >/dev/null 2>&1 || return 1
+  command -v vgs >/dev/null 2>&1 || return 1
+  command -v pvs >/dev/null 2>&1 || return 1
+  command -v pvcreate >/dev/null 2>&1 || return 1
+  command -v vgextend >/dev/null 2>&1 || return 1
+  command -v lvextend >/dev/null 2>&1 || return 1
+  command -v xfs_growfs >/dev/null 2>&1 || return 1
+
+  vg_name="$(lvs --noheadings -o vg_name "$log_src" | awk '{print $1}')"
+  lv_name="$(lvs --noheadings -o lv_name "$log_src" | awk '{print $1}')"
+  [ -n "$vg_name" ] || return 1
+  [ -n "$lv_name" ] || return 1
+
+  part="${data_disk}1"
+  wait_for_blockdev "$part" 20 1 || return 1
+
+  if ! pvs --noheadings -o pv_name 2>/dev/null | awk '{print $1}' | grep -qx "$part"; then
+    if blkid "$part" >/dev/null 2>&1; then
+      log "Wiping existing signatures on $part for LVM use..."
+      if command -v wipefs >/dev/null 2>&1; then
+        wipefs -a "$part"
+      else
+        dd if=/dev/zero of="$part" bs=1M count=10
+      fi
+    fi
+    log "Creating LVM PV on $part"
+    pvcreate -ff -y "$part"
+  fi
+
+  if ! pvs --noheadings -o pv_name,vg_name 2>/dev/null | awk '{print $1":"$2}' | grep -qx "$part:$vg_name"; then
+    log "Extending VG $vg_name with $part"
+    vgextend "$vg_name" "$part"
+  fi
+
+  lv_path="/dev/$vg_name/$lv_name"
+
+  lv_size_mb="$(lvs --noheadings --units m --nosuffix -o lv_size "$lv_path" | awk '{print $1}')"
+  pv_free_mb="$(pvs --noheadings --units m --nosuffix -o pv_free "$part" | awk '{print $1}')"
+
+  if command -v pvmove >/dev/null 2>&1 && \
+     awk -v free="$pv_free_mb" -v need="$lv_size_mb" 'BEGIN { exit (free+0 >= need+0) ? 0 : 1 }'; then
+    log "Attempting to move $lv_path to $part"
+    cur_pvs="$(lvs --noheadings -o devices "$lv_path" | tr ',' '\n' | awk '{print $1}' | sed 's/(.*)//' | sort -u)"
+    moved_ok=1
+    for pv in $cur_pvs; do
+      if [ "$pv" != "$part" ]; then
+        if ! pvmove -n "$lv_name" "$pv" "$part"; then
+          moved_ok=0
+          break
+        fi
+      fi
+    done
+    if [ "$moved_ok" -eq 1 ]; then
+      log "Setting LV allocation policy to cling"
+      lvchange --alloc cling "$lv_path" || true
+      log "Extending $lv_path to use all free space on $part"
+      lvextend -l +100%FREE "$lv_path" "$part"
+      xfs_growfs /var/log
+      log "LVM move+extend complete for /var/log"
+      return 0
+    fi
+  fi
+
+  log "Extending $lv_path to use all free space"
+  lvextend -l +100%FREE "$lv_path"
+  xfs_growfs /var/log
+  log "LVM extend complete for /var/log"
+  return 0
 }
 
 # Pick the first non-OS disk. We avoid /dev/sda intentionally.
@@ -122,6 +207,13 @@ echo "Selected data disk: $DATA_DISK"
 # Wait for disk to be present
 wait_for_blockdev "$DATA_DISK" 60 2 || fail "Disk $DATA_DISK did not appear."
 
+# If /var/log is an LVM LV, extend it with the new disk and exit.
+if extend_var_log_lvm "$DATA_DISK"; then
+  touch /var/log/cp-bootstrap-varlog.SUCCESS
+  echo "BOOTSTRAP SUCCESS: $(date -Is)"
+  exit 0
+fi
+
 # Sanity: show sector sizes
 echo "Sector sizes:"
 echo "/dev/sda: $(blockdev --getss /dev/sda 2>/dev/null || echo n/a)"
@@ -148,7 +240,7 @@ echo "Partition ready: $PART"
 if is_mounted /var/log; then
   echo "/var/log is already mounted. Verifying sectsz..."
   if xfs_info /var/log >/dev/null 2>&1; then
-    sect="$(xfs_info /var/log | awk -F= '/sectsz=/{print $2; exit}' | awk '{print $1}')"
+    sect="$(get_xfs_sectsz)"
     echo "Current /var/log XFS sectsz=$sect"
     if [ "$sect" = "4096" ]; then
       echo "Already correct (4K). Marking success."
