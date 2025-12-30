@@ -82,6 +82,22 @@ can stall and the kernel logs I/O errors. The bootstrap script now:
 - Creates the PV with `pvcreate --dataalignment 4K` when it detects a 4K disk.
 - Fails fast if the PV alignment is not 4K-safe.
 
+## Proof of live log writes under /var/log
+Example output while logs are streaming in:
+
+```text
+Every 5.0s: du -sh /var/log/opt/CPrt-R82/log_indexes/* | sort -h     Tue Dec 30 18:25:16 2025
+
+12K     /var/log/opt/CPrt-R82/log_indexes/template
+68K     /var/log/opt/CPrt-R82/log_indexes/firewallandvpn_2025-12-30T00-00-00
+384K    /var/log/opt/CPrt-R82/log_indexes/other-smartlog_2025-12-30T00-00-00
+480K    /var/log/opt/CPrt-R82/log_indexes/other-smartlog_2025-12-30T12-00-00
+936K    /var/log/opt/CPrt-R82/log_indexes/firewallandvpn_2025-12-30T12-00-00
+952K    /var/log/opt/CPrt-R82/log_indexes/audit_2025-12-30T00-00-00
+```
+
+Screenshot: `log.jpeg`
+
 ## Summary (for non-technical readers)
 - We added a second disk and attached it to the existing LVM storage pool.
 - We made the log volume bigger and kept the system running.
