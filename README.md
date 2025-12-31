@@ -109,4 +109,33 @@ Screenshot:
 - We added a second disk and attached it to the existing LVM storage pool.
 - We made the log volume bigger and kept the system running.
 - If we fully move the log volume to the new disk, all log I/O uses that disk.
+
+## Post-deploy verification (fresh VM)
+Run these after first boot and after reboot to confirm storage and services.
+
+**Storage layout**
+```
+lvs -o lv_name,lv_path,devices
+vgs -o vg_name,vg_attr,vg_size,vg_free
+pvs -o pv_name,pv_size,pv_free,vg_name
+df -h / /var/log
+mount | grep '/var/log'
+```
+
+**LUN stability (Azure)**
+```
+ls -l /dev/disk/azure/scsi1
+```
+
+**Management services**
+```
+cpwd_admin list
+cpstat mg
+netstat -lntp | grep -E '18190|18191|18192|18210|443'
+```
+
+Expected:
+- `/var/log` mounted on `vg_splat-lv_log`
+- `cpwd_admin list` shows `CPD`, `FWM`, `CPM`
+- Port `18190` is listening (SmartConsole)
 - Other system data is not moved unless we explicitly do it.
