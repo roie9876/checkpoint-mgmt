@@ -87,10 +87,15 @@ netstat -lntp | grep -E '18190|18191|18192|18210|443'
 [Expert@fw-mgmt-vr3u47ftqjp4w:0]# 
 
 before migration start
-[Expert@fw-mgmt-vr3u47ftqjp4w:0]# pvs
-  PV         VG       Fmt  Attr PSize  PFree
-  /dev/sda4  vg_splat lvm2 a--  96.70g    0 
-[Expert@fw-mgmt-vr3u47ftqjp4w:0]# lvs
+Expert@fw-mgmt-who6drys4cyhe:0]# pvs
+  PV         VG       Fmt  Attr PSize   PFree 
+  /dev/sda4  vg_splat lvm2 a--   96.70g 33.70g
+  /dev/sdc1  vg_splat lvm2 a--  128.00g 85.00g
+[Expert@fw-mgmt-who6drys4cyhe:0]# vgs
+  VG       #PV #LV #SN Attr   VSize   VFree  
+  vg_splat   2   2   0 wz--n- 224.70g 118.70g
+[Expert@fw-mgmt-who6drys4cyhe:0]# lvs
   LV         VG       Attr       LSize  Pool Origin Data%  Meta%  Move Log Cpy%Sync Convert
   lv_current vg_splat -wi-ao---- 20.00g                                                    
-  lv_log     vg_splat -wi-ao---- 76.70g  
+  lv_log     vg_splat -wI-ao---- 43.00g                                                    
+[Expert@fw-mgmt-who6drys4cyhe:0]# 
