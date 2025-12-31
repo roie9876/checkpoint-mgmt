@@ -197,7 +197,7 @@
     },
     "bootstrapScriptUrl": {
       "type": "string",
-      "defaultValue": "",
+      "defaultValue": "https://raw.githubusercontent.com/roie9876/checkpoint-mgmt/main/cp-bootstrap-varlog-premiumv2.sh",
       "metadata": {
         "description": "URL of a bootstrap script to download and execute on first boot (used when bootstrapScript is empty). Leave empty to disable the VM extension."
       }
