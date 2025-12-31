@@ -30,98 +30,42 @@ parted -s /dev/sdb set 1 lvm on || true
 # Create an LVM PV with 4K alignment for Premium SSD v2.
 pvcreate --dataalignment 4K -ff -y /dev/sdb1
 
-# Add the new PV to the existing VG.
-vgextend vg_splat /dev/sdb1
+# Create a dedicated VG/LV for /var/log.
+vgcreate vg_varlog /dev/sdb1
+lvcreate -n lv_varlog -l 100%FREE vg_varlog /dev/sdb1
 
-# Move lv_log onto the new disk if there is enough free space.
-pvmove -n lv_log /dev/sda4 /dev/sdb1
+# Format XFS with 4K sectors.
+mkfs.xfs -f -s size=4096 /dev/vg_varlog/lv_varlog
 
-# Extend lv_log to consume remaining space on the new PV.
-lvextend -l +100%FREE /dev/vg_splat/lv_log /dev/sdb1
+# Stage a copy of current /var/log to the new filesystem.
+mkdir -p /mnt/newlog
+mount -t xfs /dev/vg_varlog/lv_varlog /mnt/newlog
+rsync -aHAX --numeric-ids /var/log/ /mnt/newlog/
+umount /mnt/newlog
 
-# Grow the filesystem online (XFS).
-xfs_growfs /var/log
+# Update /etc/fstab to mount /var/log from the new LV on reboot.
+UUID=$(blkid -s UUID -o value /dev/vg_varlog/lv_varlog)
+cp -a /etc/fstab /etc/fstab.bak.$(date +%s)
+sed -i "s|^[^#].*[[:space:]]/var/log[[:space:]].*$|UUID=$UUID /var/log xfs defaults,inode32 0 0|" /etc/fstab
 
-## 3) Verify storage layout
-# Check LV placement (lv_log should be on /dev/sdb1).
+# Reboot to activate the new /var/log mount.
+# shutdown -r +1 "Rebooting to mount new /var/log"
+
+## 3) Verify storage layout (after reboot)
+# /var/log should now be on vg_varlog/lv_varlog.
 lvs -o lv_name,lv_path,devices
 pvs -o pv_name,pv_size,pv_free,vg_name
 vgs -o vg_name,vg_attr,vg_size,vg_free
 
-# Confirm /var/log is mounted and sized as expected.
 df -h /var/log
 mount | grep '/var/log'
 
 # Check XFS sector size (should reflect 4K).
 xfs_info /var/log | egrep "sectsz|bsize"
 
-## 4) Live move monitoring (optional)
-watch -n 5 'lvs -a -o+devices'
-watch -n 5 'pvs -o+pv_used,vg_name'
-
-## 5) GAiA management checks (SmartConsole readiness)
+## 4) GAiA management checks (SmartConsole readiness)
 # Core processes.
 cpwd_admin list
-cpstat mg
 
 # Ports: 18190 (SmartConsole), 18210 (CPCA), 443 (WebUI), 18191/18192 (CPD).
 netstat -lntp | grep -E '18190|18191|18192|18210|443'
-
-# If SmartConsole fails, restart CPM/FWM.
-# cpwd_admin stop -name CPM -path "$CPDIR/bin/cpm"
-# cpwd_admin start -name CPM -path "$CPDIR/bin/cpm"
-# cpwd_admin stop -name FWM -path "$CPDIR/bin/fwm"
-# cpwd_admin start -name FWM -path "$CPDIR/bin/fwm"
-
-
-
-
-
-
-[Expert@fw-mgmt-vr3u47ftqjp4w:0]# blockdev --getss /dev/sda
-512
-[Expert@fw-mgmt-vr3u47ftqjp4w:0]# blockdev --getss /dev/sdb
-512
-[Expert@fw-mgmt-vr3u47ftqjp4w:0]# blockdev --getss /dev/sdc
-4096
-[Expert@fw-mgmt-vr3u47ftqjp4w:0]# 
-
-before migration start
-Expert@fw-mgmt-who6drys4cyhe:0]# pvs
-  PV         VG       Fmt  Attr PSize   PFree 
-  /dev/sda4  vg_splat lvm2 a--   96.70g 33.70g
-  /dev/sdc1  vg_splat lvm2 a--  128.00g 85.00g
-[Expert@fw-mgmt-who6drys4cyhe:0]# vgs
-  VG       #PV #LV #SN Attr   VSize   VFree  
-  vg_splat   2   2   0 wz--n- 224.70g 118.70g
-[Expert@fw-mgmt-who6drys4cyhe:0]# lvs
-  LV         VG       Attr       LSize  Pool Origin Data%  Meta%  Move Log Cpy%Sync Convert
-  lv_current vg_splat -wi-ao---- 20.00g                                                    
-  lv_log     vg_splat -wI-ao---- 43.00g                                                    
-[Expert@fw-mgmt-who6drys4cyhe:0]# 
-
-
-
-migration in progress example output
-
-Every 5.0s: lvs -a -o+devices                                                                                                                            Wed Dec 31 06:57:42 2025
-
-  LV         VG       Attr       LSize  Pool Origin Data%  Meta%  Move      Log Cpy%Sync Convert Devices
-  lv_current vg_splat -wi-ao---- 20.00g                                                          /dev/sda4(2560)
-  lv_log     vg_splat -wI-ao---- 43.00g                                                          pvmove0(0)
-  lv_log     vg_splat -wI-ao---- 43.00g                                                          pvmove0(0)
-  [pvmove0]  vg_splat p-C-aom--- 43.00g                           /dev/sda4     17.24            /dev/sda4(0),/dev/sdb1(0)
-  [pvmove0]  vg_splat p-C-aom--- 43.00g                           /dev/sda4     17.24            /dev/sda4(7680),/dev/sdb1(2560)
-
-
-  Every 5.0s: lvs -a -o+devices                                                                                                                            Wed Dec 31 06:57:57 2025
-
-  LV         VG       Attr       LSize  Pool Origin Data%  Meta%  Move      Log Cpy%Sync Convert Devices
-  lv_current vg_splat -wi-ao---- 20.00g                                                          /dev/sda4(2560)
-  lv_log     vg_splat -wI-ao---- 43.00g                                                          pvmove0(0)
-  lv_log     vg_splat -wI-ao---- 43.00g                                                          pvmove0(0)
-  [pvmove0]  vg_splat p-C-aom--- 43.00g                           /dev/sda4     21.31            /dev/sda4(0),/dev/sdb1(0)
-  [pvmove0]  vg_splat p-C-aom--- 43.00g                           /dev/sda4     21.31            /dev/sda4(7680),/dev/sdb1(2560)
-
-
-  dmesg | tail -n 50 | grep -i 'I/O error\|aligned\|sector'
