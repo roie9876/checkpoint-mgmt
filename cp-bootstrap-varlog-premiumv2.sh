@@ -55,6 +55,14 @@ get_logical_sector_size() {
   blockdev --getss "$1" 2>/dev/null || echo ""
 }
 
+disk_has_mounted_partitions() {
+  local dev="$1"
+  local base
+  base="$(basename "$dev")"
+  # Skip disks with any mounted partition (e.g., /dev/sdb1).
+  awk -v b="$base" '$1 ~ ("/" b "[0-9]+$") { found=1 } END { exit found?0:1 }' /proc/mounts 2>/dev/null
+}
+
 is_aligned_4k() {
   local bytes="$1"
   [ -n "$bytes" ] || return 1
@@ -257,6 +265,7 @@ pick_data_disk() {
 
   log "Enumerating candidate disks..."
   # Use /sys/block to avoid needing lsblk (not always present)
+  local fallback=""
   for b in /sys/block/sd*; do
     local d="/dev/$(basename "$b")"
 
@@ -282,13 +291,31 @@ pick_data_disk() {
       continue
     fi
 
-    # If it already has partitions/filesystems, we still can use it,
-    # but for safety we prefer disks with no partitions.
-    # We'll print what we see and let the script proceed (fresh env expected).
-    log "Candidate disk found: $d"
-    echo "$d"
-    return 0
+    if disk_has_mounted_partitions "$d"; then
+      log "Skipping disk with mounted partitions: $d"
+      continue
+    fi
+
+    local ss
+    ss="$(get_logical_sector_size "$d")"
+    log "Candidate disk found: $d (logical sector size ${ss:-unknown})"
+
+    # Prefer 4K logical sector disks (Premium SSD v2).
+    if [ -n "$ss" ] && [ "$ss" -ge 4096 ]; then
+      echo "$d"
+      return 0
+    fi
+
+    # Keep first non-4K candidate as a fallback.
+    if [ -z "$fallback" ]; then
+      fallback="$d"
+    fi
   done
+
+  if [ -n "$fallback" ]; then
+    echo "$fallback"
+    return 0
+  fi
 
   return 1
 }
