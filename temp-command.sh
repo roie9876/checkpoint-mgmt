@@ -23,4 +23,12 @@ df -h /var/log
 watch -n 5 'lvs -a -o+devices'
 watch -n 5 'pvs -o+pv_used,vg_name'
 
+
+verification
+
 lvs -o lv_name,devices
+lvs -o lv_name,lv_path,devices
+grep -n '/var/log' /etc/fstab
+
+df -h /var/log
+mount | grep '/var/log'

@@ -82,6 +82,11 @@ can stall and the kernel logs I/O errors. The bootstrap script now:
 - Creates the PV with `pvcreate --dataalignment 4K` when it detects a 4K disk.
 - Fails fast if the PV alignment is not 4K-safe.
 
+## Stable data disk identification (Azure LUN)
+Device names like `/dev/sdb` can change across reboots. The script prefers the
+stable Azure LUN path `/dev/disk/azure/scsi1/lunX` when available, which avoids
+disk-name drift and helps keep `/var/log` intact after reboot.
+
 ## Proof of live log writes under /var/log
 Example output while logs are streaming in:
 

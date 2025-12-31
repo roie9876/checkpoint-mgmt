@@ -103,6 +103,15 @@ resolve_symlink() {
   fi
 }
 
+get_part_path() {
+  local dev="$1"
+  if [[ "$dev" == /dev/disk/azure/scsi1/lun* ]]; then
+    echo "${dev}-part1"
+  else
+    echo "${dev}1"
+  fi
+}
+
 swapoff_if_active() {
   local dev="$1"
   if [ -z "$dev" ]; then
@@ -144,12 +153,12 @@ extend_var_log_lvm() {
   [ -n "$vg_name" ] || return 1
   [ -n "$lv_name" ] || return 1
 
-  part="${data_disk}1"
+  part="$(get_part_path "$data_disk")"
   wait_for_blockdev "$part" 20 1 || return 1
 
   swapoff_if_active "$part" || return 1
   local data_ss pe_start_bytes
-  data_ss="$(get_logical_sector_size "$data_disk")"
+  data_ss="$(get_logical_sector_size "$(resolve_symlink "$data_disk")")"
 
   if ! pvs --noheadings -o pv_name 2>/dev/null | awk '{print $1}' | grep -qx "$part"; then
     if blkid "$part" >/dev/null 2>&1; then
@@ -234,7 +243,7 @@ pick_data_disk() {
       local dev
       dev="$(resolve_symlink "$lun_path")"
       log "Using Azure data disk: $lun_path -> $dev"
-      echo "$dev"
+      echo "$lun_path"
       return 0
     fi
   fi
@@ -318,10 +327,10 @@ fi
 # Sanity: show sector sizes
 echo "Sector sizes:"
 echo "/dev/sda: $(blockdev --getss /dev/sda 2>/dev/null || echo n/a)"
-echo "$DATA_DISK: $(blockdev --getss "$DATA_DISK" 2>/dev/null || echo n/a)"
+echo "$DATA_DISK: $(blockdev --getss "$(resolve_symlink "$DATA_DISK")" 2>/dev/null || echo n/a)"
 
 # Partition: create GPT + single partition (100%) if needed.
-PART="${DATA_DISK}1"
+PART="$(get_part_path "$DATA_DISK")"
 
 echo "Checking if partition exists: $PART"
 if [ ! -b "$PART" ]; then
