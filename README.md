@@ -54,10 +54,10 @@ graph TB
 
   PV0 --> VG[VG: vg_splat]
   VG --> LV1[LV: lv_current -> /]
-  VG --> LV2[LV: lv_log -> /var/log (old)]
+  VG --> LV2[LV: lv_log -> /var/log old]
 
   PV1 --> VG2[VG: vg_varlog]
-  VG2 --> LV3[LV: lv_varlog -> /var/log (new)]
+  VG2 --> LV3[LV: lv_varlog -> /var/log new]
 ```
 
 ## Why we use a reboot instead of pvmove
