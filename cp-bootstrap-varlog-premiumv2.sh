@@ -15,6 +15,7 @@
 set -euo pipefail
 
 LOG="/var/log/cp-bootstrap-varlog.log"
+# Log to file and syslog so early boot output is not lost.
 exec > >(tee -a "$LOG" | logger -t cp-bootstrap) 2>&1
 
 echo "BOOTSTRAP START: $(date -Is)"
@@ -77,6 +78,94 @@ wait_for_partitions() {
   if command -v udevadm >/dev/null 2>&1; then
     udevadm settle || true
   fi
+}
+
+# Update /etc/fstab to mount /var/log from a given UUID.
+update_fstab_var_log() {
+  local uuid="$1"
+  [ -n "$uuid" ] || return 1
+  if grep -qE '^[^#].*[[:space:]]/var/log[[:space:]]' /etc/fstab; then
+    cp -a /etc/fstab "/etc/fstab.bak.$(date +%s)"
+    sed -i "s|^[^#].*[[:space:]]/var/log[[:space:]].*$|UUID=$uuid /var/log xfs defaults,inode32 0 0|" /etc/fstab
+  else
+    echo "UUID=$uuid /var/log xfs defaults,inode32 0 0" >> /etc/fstab
+  fi
+}
+
+# Stage a new 4K XFS filesystem and switch /var/log on next reboot.
+# Rationale: pvmove between 512B and 4K logical sector disks can trigger misaligned I/O.
+stage_var_log_to_4k_disk() {
+  local data_disk="$1"
+  local part vg_name lv_name lv_path uuid
+
+  vg_name="${LOG_VG_NAME:-vg_varlog}"
+  lv_name="${LOG_LV_NAME:-lv_varlog}"
+  part="$(get_part_path "$data_disk")"
+
+  # Create GPT + partition if missing.
+  if [ ! -b "$part" ]; then
+    command -v parted >/dev/null 2>&1 || fail "parted not found. Cannot partition disk."
+    parted -s "$data_disk" mklabel gpt
+    parted -s "$data_disk" mkpart primary 1MiB 100%
+    parted -s "$data_disk" set 1 lvm on || true
+    wait_for_partitions "$data_disk"
+  fi
+
+  wait_for_blockdev "$part" 20 1 || fail "Partition $part did not appear."
+  swapoff_if_active "$part" || fail "Failed to disable swap on $part"
+
+  if blkid "$part" >/dev/null 2>&1; then
+    log "Wiping existing signatures on $part for fresh 4K PV..."
+    if command -v wipefs >/dev/null 2>&1; then
+      wipefs -a "$part"
+    else
+      dd if=/dev/zero of="$part" bs=1M count=10
+    fi
+  fi
+
+  log "Creating 4K-aligned PV on $part"
+  pvcreate --dataalignment 4K -ff -y "$part"
+
+  # Use a dedicated VG/LV so /var/log is fully isolated on the 4K disk.
+  log "Creating VG/LV for /var/log on $part"
+  if ! vgs "$vg_name" >/dev/null 2>&1; then
+    vgcreate "$vg_name" "$part"
+  else
+    vgextend "$vg_name" "$part"
+  fi
+  lvcreate -n "$lv_name" -l 100%FREE "$vg_name" "$part"
+  lv_path="/dev/$vg_name/$lv_name"
+
+  log "Formatting $lv_path as XFS (4K sectors)"
+  mkfs.xfs -f -s size=4096 "$lv_path"
+
+  # Copy existing logs while /var/log is live; final switch happens after reboot.
+  log "Staging data copy to /mnt/newlog"
+  mkdir -p /mnt/newlog
+  mount -t xfs "$lv_path" /mnt/newlog
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -aHAX --numeric-ids /var/log/ /mnt/newlog/ || true
+  else
+    cp -a /var/log/. /mnt/newlog/ || true
+  fi
+  umount /mnt/newlog
+
+  uuid="$(blkid -s UUID -o value "$lv_path" || true)"
+  [ -n "$uuid" ] || fail "Could not read UUID for $lv_path"
+  log "Updating /etc/fstab to mount /var/log from UUID=$uuid on next boot"
+  update_fstab_var_log "$uuid"
+
+  log "Staging complete. /var/log will switch to $lv_path after reboot."
+  touch /var/log/cp-bootstrap-varlog.REBOOT
+  if [ "${REBOOT_AFTER_STAGE:-1}" -eq 1 ]; then
+    log "Rebooting to activate new /var/log..."
+    if command -v shutdown >/dev/null 2>&1; then
+      shutdown -r +1 "Rebooting to mount new /var/log"
+    else
+      reboot
+    fi
+  fi
+  return 0
 }
 
 report_final_layout() {
@@ -207,6 +296,7 @@ extend_var_log_lvm() {
   lv_size_mb="$(lvs --noheadings --units m --nosuffix -o lv_size "$lv_path" | awk '{print $1}')"
   pv_free_mb="$(pvs --noheadings --units m --nosuffix -o pv_free "$part" | awk '{print $1}')"
 
+  # Only attempt a full move when the new PV can hold the entire LV.
   if command -v pvmove >/dev/null 2>&1 && \
      awk -v free="$pv_free_mb" -v need="$lv_size_mb" 'BEGIN { exit (free+0 >= need+0) ? 0 : 1 }'; then
     # If the new disk can fully hold lv_log, move all extents to it.
@@ -242,6 +332,7 @@ extend_var_log_lvm() {
 # Pick the Azure data disk via LUN when possible (stable), then fallback.
 # You can override by exporting DATA_DISK_LUN (e.g., 0,1,2).
 pick_data_disk() {
+  # Prefer the Azure LUN symlink for stable disk selection across boots.
   local lun_dir="/dev/disk/azure/scsi1"
   local lun_path=""
   local lun="${DATA_DISK_LUN:-}"
@@ -348,6 +439,7 @@ echo "Selected data disk: $DATA_DISK"
 wait_for_blockdev "$DATA_DISK" 60 2 || fail "Disk $DATA_DISK did not appear."
 
 # Enforce 4K logical sector size to prevent misaligned I/O on Premium SSD v2.
+# If REQUIRE_4K=1, we refuse to touch 512B logical sector disks.
 REQUIRE_4K="${REQUIRE_4K:-1}"
 data_disk_ss="$(get_logical_sector_size "$(resolve_symlink "$DATA_DISK")")"
 if [ "$REQUIRE_4K" -eq 1 ]; then
@@ -362,7 +454,15 @@ fi
 # If the disk is used as swap, disable it before we modify partitioning.
 swapoff_if_active "$DATA_DISK" || fail "Failed to disable swap on $DATA_DISK"
 
-# If /var/log is an LVM LV, extend it with the new disk and exit.
+# If target is 4K, stage a clean switch and reboot (avoid pvmove misalignment).
+if [ -n "$data_disk_ss" ] && [ "$data_disk_ss" -ge 4096 ]; then
+  stage_var_log_to_4k_disk "$DATA_DISK"
+  touch /var/log/cp-bootstrap-varlog.SUCCESS
+  echo "BOOTSTRAP SUCCESS: $(date -Is)"
+  exit 0
+fi
+
+# Non-4K disks: extend in-place.
 if extend_var_log_lvm "$DATA_DISK"; then
   report_final_layout
   touch /var/log/cp-bootstrap-varlog.SUCCESS
@@ -415,113 +515,5 @@ if is_mounted /var/log; then
   fi
 fi
 
-# Detect existing filesystem on partition
-if blkid "$PART" >/dev/null 2>&1; then
-  echo "WARNING: $PART already has a filesystem signature:"
-  blkid "$PART" || true
-  echo "Because this is intended for a fresh deployment, we will REFORMAT $PART."
-else
-  echo "$PART appears empty (no blkid signature)."
-fi
-
-# Prepare a safe staging mount under /mnt/newlog
-NEW_MNT="/mnt/newlog"
-mkdir -p "$NEW_MNT"
-
-# Format as XFS with 4K sector size (required for Premium SSD v2 4K logical sectors)
-echo "Formatting $PART as XFS with 4K sectors..."
-command -v mkfs.xfs >/dev/null 2>&1 || fail "mkfs.xfs not found."
-mkfs.xfs -f -s size=4096 "$PART"
-
-echo "Mounting new filesystem at $NEW_MNT"
-mount -t xfs "$PART" "$NEW_MNT"
-
-# Copy current /var/log contents (if any) to preserve anything already written
-echo "Copying existing /var/log contents into new filesystem..."
-mkdir -p "$NEW_MNT"
-# Use rsync if available, else fallback to cp -a
-if command -v rsync >/dev/null 2>&1; then
-  rsync -aHAX --numeric-ids /var/log/ "$NEW_MNT/" || true
-else
-  cp -a /var/log/. "$NEW_MNT/" || true
-fi
-
-# Swap mount: move old /var/log aside, mount new at /var/log
-echo "Switching /var/log to the new disk..."
-OLD_LOG="/var/log.old"
-mkdir -p "$OLD_LOG"
-
-# Try to stop key logging-related services if present (best-effort)
-echo "Best-effort: stopping syslog to avoid file churn during switch..."
-( service syslog stop || service rsyslog stop || true ) 2>/dev/null || true
-
-# Bind-move: unmount stage then mount at /var/log
-umount "$NEW_MNT"
-
-# If /var/log is currently a mountpoint, unmount it
-if is_mounted /var/log; then
-  echo "/var/log is a mountpoint; unmounting it first..."
-  umount /var/log || fail "Failed to unmount existing /var/log"
-fi
-
-# Move current directory content aside (only if /var/log is not a mount now)
-# We keep a backup just in case.
-if [ -d /var/log ] && [ ! -L /var/log ]; then
-  echo "Backing up current /var/log to $OLD_LOG (best-effort)..."
-  # Ensure /var/log exists
-  mkdir -p "$OLD_LOG"
-  # Copy rather than move to avoid breaking expected path structure if something fails
-  if command -v rsync >/dev/null 2>&1; then
-    rsync -aHAX --numeric-ids /var/log/ "$OLD_LOG/" || true
-  else
-    cp -a /var/log/. "$OLD_LOG/" || true
-  fi
-fi
-
-# Ensure mountpoint exists
-mkdir -p /var/log
-
-echo "Mounting $PART on /var/log"
-mount -t xfs "$PART" /var/log
-
-# Persist in /etc/fstab (idempotent)
-UUID="$(blkid -s UUID -o value "$PART" || true)"
-if [ -z "$UUID" ]; then
-  fail "Could not read UUID for $PART"
-fi
-
-echo "Persisting mount in /etc/fstab (UUID=$UUID)"
-if grep -qE '^[^#].*\s/var/log\s' /etc/fstab; then
-  echo "An existing /var/log entry exists in /etc/fstab. Updating it."
-  # Replace the existing /var/log line
-  cp -a /etc/fstab /etc/fstab.bak.$(date +%s)
-  # Use sed to replace the whole line that mounts /var/log
-  sed -i "s|^[^#].*[[:space:]]/var/log[[:space:]].*$|UUID=$UUID /var/log xfs defaults,noatime 0 0|" /etc/fstab
-else
-  echo "Adding new /var/log entry to /etc/fstab"
-  echo "UUID=$UUID /var/log xfs defaults,noatime 0 0" >> /etc/fstab
-fi
-
-# Restart syslog best-effort
-echo "Best-effort: starting syslog again..."
-( service syslog start || service rsyslog start || true ) 2>/dev/null || true
-
-# Final verification
-echo "Final verification:"
-mount | grep " /var/log " || fail "/var/log not mounted"
-df -h /var/log || true
-if xfs_info /var/log >/dev/null 2>&1; then
-  echo "xfs_info:"
-  xfs_info /var/log | egrep "sectsz|bsize" || true
-else
-  fail "/var/log is not XFS after mount"
-fi
-
-sect="$(xfs_info /var/log | awk -F= '/sectsz=/{print $2; exit}' | awk '{print $1}')"
-if [ "$sect" != "4096" ]; then
-  fail "Expected /var/log XFS sectsz=4096, got sectsz=$sect"
-fi
-
-touch /var/log/cp-bootstrap-varlog.SUCCESS
-echo "BOOTSTRAP SUCCESS: $(date -Is)"
-exit 0
+# For 512B disks, the script should have exited above.
+fail "Reached end of script without completing /var/log migration."

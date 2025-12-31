@@ -99,3 +99,29 @@ Expert@fw-mgmt-who6drys4cyhe:0]# pvs
   lv_current vg_splat -wi-ao---- 20.00g                                                    
   lv_log     vg_splat -wI-ao---- 43.00g                                                    
 [Expert@fw-mgmt-who6drys4cyhe:0]# 
+
+
+
+migration in progress example output
+
+Every 5.0s: lvs -a -o+devices                                                                                                                            Wed Dec 31 06:57:42 2025
+
+  LV         VG       Attr       LSize  Pool Origin Data%  Meta%  Move      Log Cpy%Sync Convert Devices
+  lv_current vg_splat -wi-ao---- 20.00g                                                          /dev/sda4(2560)
+  lv_log     vg_splat -wI-ao---- 43.00g                                                          pvmove0(0)
+  lv_log     vg_splat -wI-ao---- 43.00g                                                          pvmove0(0)
+  [pvmove0]  vg_splat p-C-aom--- 43.00g                           /dev/sda4     17.24            /dev/sda4(0),/dev/sdb1(0)
+  [pvmove0]  vg_splat p-C-aom--- 43.00g                           /dev/sda4     17.24            /dev/sda4(7680),/dev/sdb1(2560)
+
+
+  Every 5.0s: lvs -a -o+devices                                                                                                                            Wed Dec 31 06:57:57 2025
+
+  LV         VG       Attr       LSize  Pool Origin Data%  Meta%  Move      Log Cpy%Sync Convert Devices
+  lv_current vg_splat -wi-ao---- 20.00g                                                          /dev/sda4(2560)
+  lv_log     vg_splat -wI-ao---- 43.00g                                                          pvmove0(0)
+  lv_log     vg_splat -wI-ao---- 43.00g                                                          pvmove0(0)
+  [pvmove0]  vg_splat p-C-aom--- 43.00g                           /dev/sda4     21.31            /dev/sda4(0),/dev/sdb1(0)
+  [pvmove0]  vg_splat p-C-aom--- 43.00g                           /dev/sda4     21.31            /dev/sda4(7680),/dev/sdb1(2560)
+
+
+  dmesg | tail -n 50 | grep -i 'I/O error\|aligned\|sector'
