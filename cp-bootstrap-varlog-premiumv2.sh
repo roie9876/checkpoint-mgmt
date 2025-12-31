@@ -59,7 +59,7 @@ disk_has_mounted_partitions() {
   local dev="$1"
   local base
   base="$(basename "$dev")"
-  # Skip disks with any mounted partition (e.g., /dev/sdb1).
+  # Skip disks with any mounted partition (avoid resource/OS disks).
   awk -v b="$base" '$1 ~ ("/" b "[0-9]+$") { found=1 } END { exit found?0:1 }' /proc/mounts 2>/dev/null
 }
 
@@ -113,6 +113,7 @@ resolve_symlink() {
 
 get_part_path() {
   local dev="$1"
+  # Azure LUN symlinks expose partitions as lunX-partY.
   if [[ "$dev" == /dev/disk/azure/scsi1/lun* ]]; then
     echo "${dev}-part1"
   else
@@ -142,6 +143,7 @@ extend_var_log_lvm() {
   local log_src vg_name lv_name lv_path part
   local lv_size_mb pv_free_mb cur_pvs moved_ok
 
+  # Only handle cases where /var/log is an LVM LV already.
   log_src="$(get_mount_source /var/log)"
   case "$log_src" in
     /dev/mapper/*) ;;
@@ -168,6 +170,7 @@ extend_var_log_lvm() {
   local data_ss pe_start_bytes
   data_ss="$(get_logical_sector_size "$(resolve_symlink "$data_disk")")"
 
+  # Create PV if missing; wipe signatures to avoid stale metadata conflicts.
   if ! pvs --noheadings -o pv_name 2>/dev/null | awk '{print $1}' | grep -qx "$part"; then
     if blkid "$part" >/dev/null 2>&1; then
       log "Wiping existing signatures on $part for LVM use..."
@@ -179,6 +182,7 @@ extend_var_log_lvm() {
     fi
     log "Creating LVM PV on $part"
     if [ -n "$data_ss" ] && [ "$data_ss" -ge 4096 ]; then
+      # Premium SSD v2 uses 4K logical sectors; enforce 4K PV alignment.
       pvcreate --dataalignment 4K -ff -y "$part"
     else
       pvcreate -ff -y "$part"
@@ -188,6 +192,7 @@ extend_var_log_lvm() {
   if [ -n "$data_ss" ] && [ "$data_ss" -ge 4096 ]; then
     pe_start_bytes="$(pvs --noheadings --units b -o pe_start "$part" 2>/dev/null | tr -d ' B')"
     if ! is_aligned_4k "$pe_start_bytes"; then
+      # Fail early instead of letting pvmove hang with misaligned I/O.
       fail "PV on $part is not 4K aligned (pe_start=${pe_start_bytes}B). Recreate PV with --dataalignment 4K."
     fi
   fi
@@ -204,6 +209,7 @@ extend_var_log_lvm() {
 
   if command -v pvmove >/dev/null 2>&1 && \
      awk -v free="$pv_free_mb" -v need="$lv_size_mb" 'BEGIN { exit (free+0 >= need+0) ? 0 : 1 }'; then
+    # If the new disk can fully hold lv_log, move all extents to it.
     log "Attempting to move $lv_path to $part"
     cur_pvs="$(lvs --noheadings -o devices "$lv_path" | tr ',' '\n' | awk '{print $1}' | sed 's/(.*)//' | sort -u)"
     moved_ok=1
@@ -256,6 +262,7 @@ pick_data_disk() {
     fi
   fi
 
+  # Fallback mode: avoid OS disk and any mounted partitions.
   log "Detecting OS disk(s) from mounts..."
   local os_src log_src
   os_src="$(get_mount_source /)"
@@ -339,6 +346,18 @@ echo "Selected data disk: $DATA_DISK"
 
 # Wait for disk to be present
 wait_for_blockdev "$DATA_DISK" 60 2 || fail "Disk $DATA_DISK did not appear."
+
+# Enforce 4K logical sector size to prevent misaligned I/O on Premium SSD v2.
+REQUIRE_4K="${REQUIRE_4K:-1}"
+data_disk_ss="$(get_logical_sector_size "$(resolve_symlink "$DATA_DISK")")"
+if [ "$REQUIRE_4K" -eq 1 ]; then
+  if [ -z "$data_disk_ss" ]; then
+    fail "Could not detect logical sector size for $DATA_DISK; refusing to proceed."
+  fi
+  if [ "$data_disk_ss" -lt 4096 ]; then
+    fail "Selected data disk $DATA_DISK has logical sector size ${data_disk_ss}B; Premium SSD v2 requires 4K."
+  fi
+fi
 
 # If the disk is used as swap, disable it before we modify partitioning.
 swapoff_if_active "$DATA_DISK" || fail "Failed to disable swap on $DATA_DISK"
